@@ -1,0 +1,300 @@
+# ---------------------------------------------------------------------------
+# Load dependencies and source all pipeline modules.
+# Sourced by run_qc.R and by tests/test_helpers.R.
+# ---------------------------------------------------------------------------
+
+required <- c("dplyr", "purrr", "stringr", "zoo", "yaml", "readr")
+missing  <- required[!vapply(required, requireNamespace, logical(1), quietly = TRUE)]
+if (length(missing) > 0L) {
+  stop(
+    "Missing packages: ", paste(missing, collapse = ", "),
+    "\nInstall with:\n  install.packages(c(",
+    paste0('"', missing, '"', collapse = ", "), "))",
+    call. = FALSE
+  )
+}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(zoo)
+})
+
+source("R/01_helpers.R")
+source("R/02_io.R")
+source("R/03_flags_absolute.R")
+source("R/04_flags_derivative.R")
+source("R/05_flags_invariant.R")
+source("R/06_assign_good.R")
+source("R/07_export.R")
+
+# ---------------------------------------------------------------------------
+      keep_zero = 0,
+      flag      = 1,
+      propagate = NA_integer_
+    ))
+  }
+  n <- length(sm_array)
+  if (n == 3) {
+    if ((sm_array[1] > sm_array[2] && sm_array[2] < sm_array[3]) ||
+        (sm_array[1] < sm_array[2] && sm_array[2] > sm_array[3])) return(1)
+  } else if (n > 3) {
+    if ((sm_array[1] > sm_array[2] && sm_array[2] == sm_array[3] &&
+         sm_array[3] < sm_array[4]) ||
+        (sm_array[1] < sm_array[2] && sm_array[2] == sm_array[3] &&
+         sm_array[3] > sm_array[4])) return(2)
+  }
+  0
+}
+
+#' Drop exact TIMESTAMP duplicates, keeping the first occurrence
+dedup_timestamp <- function(df) {
+  if (is.null(df) || nrow(df) == 0L) return(df)
+  if (!"TIMESTAMP" %in% names(df)) return(df)
+  n_dup <- sum(duplicated(df$TIMESTAMP))
+  if (n_dup > 0L) {
+    warning(sprintf("Duplicate TIMESTAMPs (%d rows). Keeping first.", n_dup),
+            call. = FALSE)
+  }
+  df <- dplyr::arrange(df, .data$TIMESTAMP)
+  df[!duplicated(df$TIMESTAMP), , drop = FALSE]
+}
+
+#' Coerce all non-TIMESTAMP columns to numeric
+clean_frame <- function(df) {
+  num_cols <- setdiff(names(df), "TIMESTAMP")
+  df[num_cols] <- lapply(
+    df[num_cols],
+    function(x) suppressWarnings(as.numeric(as.character(x)))
+  )
+  df
+}
+
+#' Strip the "ID" prefix from column names
+rearrange_dfs <- function(df_list) {
+  lapply(df_list, function(df) {
+    if (is.null(df) || nrow(df) == 0L) return(df)
+    names(df) <- stringr::str_remove_all(names(df), "ID")
+    df
+  })
+}
+
+#' Full-join a list of data frames on TIMESTAMP, coalescing repeated columns
+join_by_timestamp <- function(dfs) {
+  dfs <- lapply(dfs, dedup_timestamp)
+  if (length(dfs) == 1L) return(dfs[[1]])
+
+  df <- purrr::reduce(
+    dfs,
+    function(x, y) dplyr::full_join(x, y, by = "TIMESTAMP", suffix = c("", ".y"))
+  )
+
+  repeat {
+    nm    <- names(df)
+    base  <- sub("(\\.y)+$", "", nm)
+    grp   <- split(nm, base)
+    multi <- grp[vapply(grp, length, 1L) > 1L]
+    if (length(multi) == 0L) break
+    for (b in names(multi)) {
+      df[[b]] <- do.call(dplyr::coalesce, unname(df[multi[[b]]]))
+    }
+    df <- df[, !duplicated(names(df)), drop = FALSE]
+  }
+  df
+}
+
+#' Count occurrences of a flag across a list of data frames
+flag_summary <- function(df_list, flag) {
+  vapply(
+    df_list,
+    function(df) {
+      if (is.null(df) || !"qflag" %in% names(df)) return(0)
+      sum(grepl(flag, df$qflag, fixed = TRUE), na.rm = TRUE)
+    },
+    numeric(1)
+  )
+}
+
+#' Ensure a qflag column exists
+ensure_qflag <- function(df) {
+  if (!"qflag" %in% names(df)) df$qflag <- NA_character_
+  df
+}
+
+# in/output
+# ---------------------------------------------------------------------------
+# Absolute / range flags: C01, C02, C03, D01
+# ---------------------------------------------------------------------------
+
+#' C01: soil moisture below threshold
+flag_C01 <- function(df, cfg) {
+  df <- ensure_qflag(df)
+  idx <- which(df$SoilMoisture < cfg$C01_sm_low & !is.na(df$SoilMoisture))
+  df$qflag <- add_flag(df$qflag, idx, "C01")
+  df
+}
+
+#' C02: soil moisture below a second threshold
+#'
+#' TODO(verify): C02 is matched by the export regex but never assigned in the
+#' source script. Supply the condition and threshold, or drop it from the mapping.
+flag_C02 <- function(df, cfg) {
+  if (is.null(cfg$C02_sm_low_secondary)) return(df)
+  df <- ensure_qflag(df)
+  idx <- which(df$SoilMoisture < cfg$C02_sm_low_secondary &
+               !is.na(df$SoilMoisture))
+  df$qflag <- add_flag(df$qflag, idx, "C02")
+  df
+}
+
+#' C03: soil moisture above the saturation point
+flag_C03 <- function(df, cfg) {
+  df <- ensure_qflag(df)
+  if ("TIMESTAMP" %in% names(df)) df$day <- as.Date(df$TIMESTAMP)
+  idx <- which(df$SoilMoisture > cfg$C03_sm_saturation)
+  df$qflag <- add_flag(df$qflag, idx, "C03")
+  df
+}
+
+#' D01: soil temperature below threshold
+flag_D01 <- function(df, cfg) {
+  df <- ensure_qflag(df)
+  if ("TIMESTAMP" %in% names(df)) df$day <- as.Date(df$TIMESTAMP)
+  idx <- which(df$SoilTemp < cfg$D01_soil_temp_low & !is.na(df$SoilTemp))
+  df$qflag <- add_flag(df$qflag, idx, "D01")
+  df
+}
+
+apply_absolute_flags <- function(df_list, cfg) {
+  df_list <- lapply(df_list, flag_C01, cfg = cfg)
+  df_list <- lapply(df_list, flag_C02, cfg = cfg)
+  df_list <- lapply(df_list, flag_C03, cfg = cfg)
+  df_list <- lapply(df_list, flag_D01, cfg = cfg)
+  df_list
+}
+
+# ---------------------------------------------------------------------------
+    dplyr::mutate(
+      eq4 = round(.data$SoilMoisture / dplyr::lag(.data$SoilMoisture), 3),
+      eq5 = round(abs(.data$savgol2 / dplyr::lead(.data$savgol2, n = 2)), 3),
+      eq5 = dplyr::lag(.data$eq5),
+      # TODO(verify): the source nested rolling_var/rolling_mean inside
+      # zoo::rollapply. Eq. 6 of Dorigo et al. requires variance / mean,
+      # so FUN is set to var and mean directly. If the nesting was
+      # intentional, results will differ.
+      eq6_I = abs(
+        zoo::rollapply(.data$SoilMoisture, cfg$D06_rollvar_window_steps,
+                       FUN = stats::var, align = "center", fill = NA) /
+        zoo::rollapply(.data$SoilMoisture, cfg$D06_rollmean_window_steps,
+                       FUN = mean, align = "center", fill = NA)
+      ),
+      eq6_II = zoo::rollapply(
+        .data$SoilMoisture, width = 4, FUN = peak_D06,
+        align = "center", fill = 0, partial = TRUE
+      ),
+      eq6_spike2h = as.numeric(dplyr::lag(.data$eq6_II) > 1),
+      eq6_spike = as.numeric(
+        !is.na(.data$eq4) & !is.na(.data$eq5) &
+        !is.na(.data$eq6_I) & !is.na(.data$eq6_II) &
+        !is.na(.data$eq6_spike2h) &
+        (((.data$eq4 > cfg$D06_eq4_upper) | (.data$eq4 < cfg$D06_eq4_lower)) |
+          (.data$eq6_spike2h > 0)) &
+        ((.data$eq5 > cfg$D06_eq5_lower) & (.data$eq5 < cfg$D06_eq5_upper)) &
+        (.data$eq6_I < cfg$D06_eq6_I_max) & (.data$eq6_II > cfg$D06_eq6_II_min)
+      )
+    )
+
+  idx <- which(df$eq6_spike > 0 |
+               (dplyr::lag(df$eq6_spike) > 0 & df$eq6_spike2h > 0))
+  df$qflag <- add_flag(df$qflag, idx, "D06")
+  df
+}
+
+#' D07: soil moisture drops and jumps, Dorigo et al. (2013) Eq. 7-9
+#'
+#' Requires `savgol1` and `savgol2`.
+#'
+#' TODO(verify): source comments contradict each other on whether D08 exists as
+#' a separate flag. Only "D07" is written here.
+flag_D07 <- function(df, cfg) {
+  if (!all(c("savgol1", "savgol2") %in% names(df))) {
+    stop("D07 requires columns 'savgol1' and 'savgol2'. See TODO in run_qc.R.")
+  }
+  df <- ensure_qflag(df)
+
+  df <- df %>%
+    dplyr::mutate(
+      abs_change = c(NA, diff(.data$SoilMoisture)),
+      rel_change = abs(.data$abs_change / .data$SoilMoisture),
+      # FIX: zoo::rollmean() has no na.rm argument and errors on NA input.
+      # zoo::rollapply(..., FUN = mean, na.rm = TRUE) is used instead.
+      eq8 = abs(
+        zoo::rollapply(.data$savgol1, cfg$D07_rollmean_window_steps,
+                       FUN = mean, align = "center", fill = NA, na.rm = TRUE) *
+        cfg$D07_eq8_scale
+      ),
+      eq9a = round(abs(.data$savgol2 / dplyr::lag(.data$savgol2)), 1),
+      eq9b = abs(.data$savgol2 / dplyr::lead(.data$savgol2))
+    )
+
+  idx <- which(
+    df$rel_change > cfg$D07_rel_change_min &
+    abs(df$abs_change) > cfg$D07_abs_change_min &
+    abs(df$savgol1) > abs(df$eq8) &
+    abs(df$savgol1 - df$eq8) > cfg$D07_eq9a_tol &
+    abs(df$eq9a - 1) <= cfg$D07_eq9a_tol &
+    df$eq9b > cfg$D07_eq9b_min
+  )
+  df$qflag <- add_flag(df$qflag, idx, "D07")
+  df
+}
+
+
+# ---------------------------------------------------------------------------
+# Invariant-value flags: D09.1, D09.2
+# ---------------------------------------------------------------------------
+
+#' D09.1: invariant values over a rolling window
+#'
+#' TODO(verify): the source comment says "min. 24h" but the code tests the
+#' 12-hour variance window. Confirm which is intended.
+flag_D09_1 <- function(df, cfg) {
+  if (is.null(df) || nrow(df) == 0L) return(df)
+  df <- ensure_qflag(df)
+  steps <- cfg$D09_1_variance_window_hours * 60 / cfg$timestep_minutes
+
+  df$abs_var_window <- zoo::rollapplyr(
+    df$SoilMoisture, width = steps, FUN = stats::var, fill = NA
+  )
+  idx <- which(df$abs_var_window == 0 & df$rel_change == 0)
+  df$qflag <- add_flag(df$qflag, idx, "D09.1")
+  df
+}
+
+#' D09.2: identical value for at least `constant_window_hours`
+flag_D09_2 <- function(df, cfg) {
+  if (is.null(df) || nrow(df) == 0L) return(df)
+  df <- ensure_qflag(df)
+  steps <- cfg$D09_2_constant_window_hours * 60 / cfg$timestep_minutes
+
+  if (nrow(df) < steps) {
+    df$const_run <- NA_integer_
+    return(df)
+  }
+  df$const_run <- rle_expand(df$SoilMoisture)
+  idx <- which(df$const_run >= steps & df$rel_change == 0)
+  df$qflag <- add_flag(df$qflag, idx, "D09.2")
+  df
+}
+
+apply_invariant_flags <- function(df_list, cfg) {
+  df_list <- lapply(df_list, flag_D09_1, cfg = cfg)
+  df_list <- lapply(df_list, flag_D09_2, cfg = cfg)
+  df_list
+}
+
+
+
+
+
