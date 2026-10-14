@@ -1,0 +1,259 @@
+# Approach following Seeger et al. (2026)
+
+# =============================================================================
+w_f = fresh weight (kg)
+w_d = dry weight (kg)
+v_f = fresh volume (m^3)
+TTD = total tree diameter (cm)
+BDD = bark thickness (cm)
+SWD = sapwood diameter (cm)
+
+## ---- 2.1 Wood/sap properties (thermal diffusivity D) ----------------------
+
+#' Sapwood moisture content
+#' m_c = (w_f - w_d) / w_d
+#' @param w_f,w_d fresh and oven-dry weight of a wood sample (any consistent unit)
+moisture_content <- function(w_f, w_d) (w_f - w_d) / w_d
+
+
+#' Moisture content at fiber saturation point (after Roderick & Berry, 2001)
+#' mc_FSP = 0.2 * (rho_b / rho_w)^-0.5
+mc_fiber_saturation <- function(rho_b, rho_w = 1000) 0.2 * (rho_b / rho_w)^(-0.5)
+
+
+#' Void fraction of wood at fiber saturation point
+#' Fv_FSP = 1 - (rho_b/rho_w) * (rho_w/rho_c + mc_FSP)
+#' @param rho_c cell wall density, constant 1530 kg/m3 (Kollmann & Cote, 1968)
+void_fraction_fsp <- function(rho_b, mc_fsp, rho_w = 1000, rho_c = 1530) {
+  1 - (rho_b / rho_w) * (rho_w / rho_c + mc_fsp)
+}
+
+
+# calculate for df_variables sap
+df_mc = df_variables_sap%>%
+mutate(
+  mc=moisture_content(w_f, w_d),
+  rho_b=w_d/v_f,
+  mc_fsp=mc_fiber_saturation(rho_b),
+  fv_fsp=void_fraction_fsp(rho_b, mc_fsp)
+)
+
+#' Thermal conductivity of fresh sapwood (after Vandegehuchte & Steppe,
+#' 2012 -- preferred over the Swanson 1983 / Burgess et al. 2001 formula,
+#' which is unsuited for fresh green wood)
+#'
+#' Ks = Kw * (mc - mc_FSP) * (rho_b/rho_w) + 0.04186 * (21 - 20 * Fv_FSP)
+#'
+#' @param rho_b sapwood basic density (dry weight / fresh volume, kg/m^3)
+#' @param mc    sapwood moisture content (dry-mass basis, e.g. 1.0 = 100%)
+#' @param Kw    thermal conductivity of water, 0.5984 (as given in the paper;
+#'              physically W m^-1 K^-1)
+#' @param rho_w density of water, 1000 kg/m^3
+#' @param rho_c cell wall density, 1530 kg/m^3 (Kollmann & Cote, 1968)
+#' @return Ks, thermal conductivity of fresh sapwood
+thermal_conductivity_sapwood <- function(rho_b, mc, Kw = 0.5984,
+                                          rho_w = 1000, rho_c = 1530) {
+  mc_fsp <- mc_fiber_saturation(rho_b, rho_w)
+  fv_fsp <- void_fraction_fsp(rho_b, mc_fsp, rho_w, rho_c)
+  Kw * (mc - mc_fsp) * (rho_b / rho_w) + 0.04186 * (21 - 20 * fv_fsp)
+}
+
+
+#' Specific heat capacity of fresh sapwood (after Edwards & Warwick, 1984)
+#' cs = cw + (cm - cw) / (mc + 1)
+#' @param cw specific heat capacity of water, 4186 J/kg/K (Lide, 1996)
+#' @param cm specific heat capacity of dry wood matrix, 1200 J/kg/K
+#'           (Becker & Edwards, 1999)
+specific_heat_sapwood <- function(mc, cw = 4186, cm = 1200) {
+  cw + (cm - cw) / (mc + 1)
+}
+
+
+#' Thermal diffusivity of fresh sapwood (after Marshall 1958)
+#' D = Ks / (rho_s * cs), with rho_s = rho_b * (1 + mc) (Marshall, 1958)
+#'
+#' @param rho_b sapwood basic density (kg/m^3)
+#' @param mc    sapwood moisture content (dry-mass basis)
+#' @return D, thermal diffusivity (same length units^2/time as Ks/(rho*c);
+#'         with SI inputs, D comes out in m^2/s)
+thermal_diffusivity_sapwood <- function(rho_b, mc) {
+  Ks    <- thermal_conductivity_sapwood(rho_b, mc)
+  cs    <- specific_heat_sapwood(mc)
+  rho_s <- rho_b * (1 + mc)
+  Ks / (rho_s * cs)
+}
+
+
+df_mc_tcs = df_mc%>%
+mutate(
+  Ks=thermal_conductivity_sapwood(rho_b, mc),
+  cs=specific_heat_sapwood(mc),
+  D=thermal_diffusivity_sapwood(rho_b, mc)
+)
+
+# Unified join key: AQUARIUS-logged trees (B/D/M plots) are keyed by their
+# "Aquarius Tree" ID; the Silver fir plot has no Aquarius entry, so it falls
+# back to Hydro_tree (S1..S7).
+df_mc_tcs <- df_mc_tcs %>%
+  mutate(tree_id = ifelse(nzchar(Aquarius.Tree), Aquarius.Tree, Hydro_tree))
+
+## ---- 2.2 Heat pulse velocity and wound correction --------------------------
+
+#' Heat pulse velocity (Marshall 1958)
+#' vh = (D / x) * ln(dT_d / dT_u)
+#'
+#' @param dT_downstream,dT_upstream  temperature rise (K) at down-/upstream
+#'   thermistor
+#' @param x  distance from heater needle to each thermistor needle (symmetric
+#'   placement assumed). SFM5 default: 0.8 cm.
+#' @param D  thermal diffusivity of fresh sapwood, e.g. from
+#'   thermal_diffusivity_sapwood(). Use consistent length units with x
+#'   (e.g. both in cm, D in cm^2/s -> vh in cm/s).
+#'
+#' @note dT_downstream/dT_upstream <= 0 is not a physically valid heat-pulse
+#' reading (no rise, or a sign flip from sensor noise/dropout) and would
+#' otherwise silently produce +-Inf via log(0) / log(ratio with a zero
+#' denominator) rather than a warning -- both are set to NA instead so they
+#' don't poison downstream means/sums.
+heat_pulse_velocity <- function(dT_downstream, dT_upstream, x, D) {
+  dT_downstream[dT_downstream <= 0] <- NA
+  dT_upstream[dT_upstream <= 0]     <- NA
+  (D / x) * log(dT_downstream / dT_upstream)
+}
+
+
+# use al dTmax
+
+#' Read one AQUARIUS single-variable export (Timestamp + Value). Header
+#' comment lines (all starting with "#") are skipped via comment.char = "#"
+#' -- note this is NOT read.csv()'s default (its default is comment.char =
+#' "", i.e. no stripping), so it must be passed explicitly. The ISO 8601 UTC
+#' column (not the local "Timestamp (UTC+01:00)" one) is used to avoid DST
+#' ambiguity.
+read_sfm_series <- function(path) {
+  df <- read.csv(path, comment.char = "#")
+  data.frame(
+    timestamp = ymd_hms(df$ISO.8601.UTC, tz = "UTC"),
+    value     = df$Value
+  )
+}
+
+#' Load one plot folder of per-variable AQUARIUS exports into a wide table
+#' (one row per tree x timestamp) with the 4 deltaTmax columns needed by
+#' heat_pulse_velocity(): *Upstream/Downstream x Inner/Outer (the two probe
+#' depths).
+#'
+#' Assumes filenames of the form
+#'   Temperature.<Species>_<PlotType>_<n>_<Variable>@<Site>.EntireRecord.csv
+#' and that <Species>_<n> maps onto the "Aquarius Tree" ID used in
+#' "sapflow variables.csv":
+#'   Pure plots  (folder_B, folder_D)  -> Beech = B<n>,  DouglasFir = D<n>
+#'   Mixed plot  (folder_M)            -> Beech = MB<n>, DouglasFir = MD<n>
+#'
+#' @param plot_type "Pure" (folder_B, folder_D) or "Mixed" (folder_M), as it
+#'   appears in the filenames themselves.
+load_dTmax_wide <- function(folder, plot_type = c("Pure", "Mixed")) {
+  plot_type <- match.arg(plot_type)
+  files <- list.files(folder, full.names = TRUE)
+  m     <- regmatches(basename(files),
+             regexec(paste0("^Temperature\\.(Beech|DouglasFir)_", plot_type, "_(\\d+)_([A-Za-z]+)@"),
+                      basename(files)))
+  ok    <- lengths(m) == 4
+  info  <- do.call(rbind, m[ok])
+  files <- files[ok]
+
+  keep <- info[, 4] %in% c("deltaTmaxUpstreamInner", "deltaTmaxUpstreamOuter",
+                            "deltaTmaxDownstreamInner", "deltaTmaxDownstreamOuter")
+  files <- files[keep]
+  info  <- info[keep, , drop = FALSE]
+
+  species_letter <- ifelse(info[, 2] == "Beech", "B", "D")
+  plot_prefix    <- if (plot_type == "Mixed") paste0("M", species_letter) else species_letter
+  tree_id        <- paste0(plot_prefix, info[, 3])
+  variable       <- info[, 4]
+
+  long <- bind_rows(lapply(seq_along(files), function(i) {
+    s <- read_sfm_series(files[i])
+    s$tree_id  <- tree_id[i]
+    s$variable <- variable[i]
+    s
+  }))
+
+  pivot_wider(long, names_from = variable, values_from = value)
+}
+
+df_B_dTmax <- load_dTmax_wide(folder_B, "Pure")
+df_D_dTmax <- load_dTmax_wide(folder_D, "Pure")
+df_M_dTmax <- load_dTmax_wide(folder_M, "Mixed")
+
+#' Read one TOA5 (Campbell Scientific CR350) sap flow logger file.
+#' Row 1 = station metadata, row 2 = column names, rows 3-4 = units/stat
+#' type, data from row 5 on. "NAN" is the logger's missing-value string.
+read_toa5_sapflow <- function(path) {
+  header <- as.character(read.csv(path, skip = 1, nrows = 1, header = FALSE,
+                                   stringsAsFactors = FALSE))
+  df <- read.csv(path, skip = 4, header = FALSE, na.strings = "NAN",
+                  stringsAsFactors = FALSE)
+  names(df) <- header
+  df$TIMESTAMP <- ymd_hms(df$TIMESTAMP, tz = "UTC")
+  df
+}
+
+#' Load the Silver fir plot folder (folder_S): multiple, possibly
+#' overlapping, TOA5 downloads, deduplicated per timestamp (keeping the most
+#' complete row when the same TIMESTAMP appears in more than one file), then
+#' reshaped from the logger's ID<serial>_<variable> wide columns into the
+#' same tree_id / deltaTmax* long format as load_dTmax_wide().
+#'
+#' @param probe_tree_map named vector, names = probe serial (as text,
+#'   matching the "ID<serial>_..." column prefix), values = tree_id (e.g.
+#'   silver_probe_tree). Probes not in the map (or trees with no probe, like
+#'   S7) are simply absent from the result.
+load_dTmax_wide_silver <- function(folder, probe_tree_map) {
+  files <- list.files(folder, full.names = TRUE)
+  raw   <- bind_rows(lapply(files, read_toa5_sapflow))
+
+  raw <- raw %>%
+    mutate(n_na = rowSums(is.na(across(-TIMESTAMP)))) %>%
+    arrange(TIMESTAMP, n_na) %>%
+    distinct(TIMESTAMP, .keep_all = TRUE) %>%
+    select(-n_na)
+
+  per_probe <- lapply(names(probe_tree_map), function(serial) {
+    cols <- paste0("ID", serial, c("_dTmaxUsOuter", "_dTmaxUsInner",
+                                    "_dTmaxDsOuter", "_dTmaxDsInner"))
+    if (!all(cols %in% names(raw))) return(NULL)
+    data.frame(
+      timestamp                = raw$TIMESTAMP,
+      tree_id                  = probe_tree_map[[serial]],
+      deltaTmaxUpstreamOuter   = raw[[cols[1]]],
+      deltaTmaxUpstreamInner   = raw[[cols[2]]],
+      deltaTmaxDownstreamOuter = raw[[cols[3]]],
+      deltaTmaxDownstreamInner = raw[[cols[4]]]
+    )
+  })
+
+  bind_rows(per_probe)
+}
+
+df_S_dTmax <- load_dTmax_wide_silver(folder_S, silver_probe_tree)
+
+df_dTmax_all <- bind_rows(df_B_dTmax, df_D_dTmax, df_M_dTmax, df_S_dTmax)
+
+# per-tree thermal diffusivity from wood cores (Part 2, section 2.1), joined
+# on the unified tree_id (Aquarius Tree for B/D/M, Hydro_tree for S). Trees
+# without a wood-core sample in "sapflow variables.csv" (e.g. MB6) will get
+# D = NA and thus vh = NA.
+df_dTmax_all <- df_dTmax_all %>%
+  left_join(df_mc_tcs %>% select(tree_id, D), by = "tree_id") %>%
+  mutate(D_cm2_s = D * 1e4)   # m^2/s -> cm^2/s, to pair with x in cm
+
+# heat pulse velocity per depth (x = 0.8 cm, SFM1 default needle spacing --
+# adjust if your probes use a different geometry)
+df_dTmax_all <- df_dTmax_all %>%
+  mutate(
+    vh_inner_cm_s = heat_pulse_velocity(deltaTmaxDownstreamInner, deltaTmaxUpstreamInner,
+                                         x = 0.8, D = D_cm2_s),
+    vh_outer_cm_s = heat_pulse_velocity(deltaTmaxDownstreamOuter, deltaTmaxUpstreamOuter,
+                                         x = 0.8, D = D_cm2_s)
+  )
