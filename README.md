@@ -21,8 +21,6 @@ Only observations with no flag receive `G`.
 | `D09.1` | Invariant values ≥ 12 h | rolling variance `== 0` |
 | `D09.2` | Identical value ≥ 48 h | constant run ≥ X steps |
 
-See `docs/flag_definitions.md` for details and open questions.
-
 ## Requirements
 
 R ≥ 4.2 and:
