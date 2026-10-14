@@ -30,8 +30,9 @@ install.packages(c("dplyr", "purrr", "stringr", "zoo", "yaml", "readr"))
 
 ## Citation
 
-See `CITATION. Please cite Dorigo et al. (2013) alongside this code.
+Please cite Dorigo et al. (2013) alongside this code.
+#tbd
 
 ## License
 
-See `LICENSE`.
+#tbd
