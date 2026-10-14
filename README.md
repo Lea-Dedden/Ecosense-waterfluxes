@@ -1,6 +1,6 @@
 # Ecosense-waterfluxes
 
-# soilmoisture-qc
+# soil moisture quality control
 
 Automated quality flagging for near-surface soil moisture time series at
 15-minute resolution, following the framework of Dorigo et al. (2013).
@@ -21,16 +21,21 @@ Only observations with no flag receive `G`.
 | `D09.1` | Invariant values ≥ 12 h | rolling variance `== 0` |
 | `D09.2` | Identical value ≥ 48 h | constant run ≥ X steps |
 
+# throughfall & stemflow quality control
+tbd
+
+# sapflow quality control & baseline corrections
+tbd
+
 ## Requirements
 
 R ≥ 4.2 and:
 install.packages(c("dplyr", "purrr", "stringr", "zoo", "yaml", "readr"))
 
 ## Citation
-
-Please cite Dorigo et al. (2013) alongside this code.
-#tbd
+Please cite Dorigo et al. (2013) alongside the code for soil moisture quality control.
+Please cite Seeger et al. (2026) alongside the code for sapflow density calculation.
+#tbd own publications
 
 ## License
-
-#tbd
+tbd
