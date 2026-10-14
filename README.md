@@ -38,4 +38,6 @@ Please cite Seeger et al. (2026) alongside the code for sapflow density calculat
 #tbd own publications
 
 ## License
-tbd
+This code can be distributed freely under the GPL v3 license. Please read the LICENSE for further information.
+
+© 2026, Lea Dedden
