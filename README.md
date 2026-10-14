@@ -1,6 +1,6 @@
 # Ecosense-waterfluxes
 
-## soil moisture quality control
+## Soil moisture quality control
 
 Automated quality flagging for near-surface soil moisture time series at
 15-minute resolution, following the framework of Dorigo et al. (2013).
@@ -21,10 +21,10 @@ Only observations with no flag receive `G`.
 | `D09.1` | Invariant values ≥ 12 h | rolling variance `== 0` |
 | `D09.2` | Identical value ≥ 48 h | constant run ≥ X steps |
 
-## throughfall & stemflow quality control
+## Throughfall & stemflow quality control
 tbd
 
-## sapflow quality control & baseline corrections
+## Sapflow quality control & baseline corrections
 tbd
 
 ## Requirements
