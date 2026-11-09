@@ -1,6 +1,4 @@
-# ---------------------------------------------------------------------------
-# Load dependencies and source all pipeline modules.
-# Sourced by run_qc.R and by tests/test_helpers.R.
+
 # ---------------------------------------------------------------------------
 
 required <- c("dplyr", "purrr", "stringr", "zoo", "yaml", "readr")
