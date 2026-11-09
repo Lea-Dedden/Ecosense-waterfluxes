@@ -12,20 +12,20 @@ library(signal)
 # flag criteria - flag added to qflag column if crtieria are met
 # names = ['C01', 'C02', 'C03', 'D01', 'D02', 'D03', 'D04', 'D05', 'D06', 'D07', 'D08', 'D09', 'D10', 'G']
 
-# C01 soil moisture < threshold', 
-# C02 soil moisture > saturation point',
-# C03 soil moisture > saturation point',
-#'negative soil temperature( in situ)',
-#D01: rise in soil moisture without precipitation( in situ)',
-#'spikes',
-#'negative breaks(drops)',
-#'positive breaks(jumps)',
-#'constant values following negative break',
-#'saturated plateaus',
-#'good'
+# C01 soil moisture < threshold
+# C02 soil moisture > threshold
+# C03 soil moisture > saturation point
+# D01 negative soil temperature( in situ)
+# D04 rise in soil moisture without precipitation( in situ)
+# D06 spikes
+# D07 negative breaks(drops)
+# D08 positive breaks(jumps)
+# D09.1 constant values following negative break
+# D09.2 saturated plateaus
+# G good
 
 # ---------------------------------------------------------------------
-# 1) CONFIGURATION: all thresholds and parameters in one place
+# 1) CONFIGURATION: site-specific
 # ---------------------------------------------------------------------
 cfg <- list(
   tz            = "CET",  # timezone for date conversion (e.g., for daily precip)
@@ -90,7 +90,7 @@ add_savgol_deriv <- function(df, col = "SoilMoisture", m = 1,
   df
 }
 
-# variance / mean over 25h window Eexcluding current value
+# variance / mean over 25h window excluding current value
 rolling_var_excl <- function(x) {
   if (length(x) <= 1) return(NA_real_)
   var(x[-13])
@@ -122,7 +122,6 @@ count_flag <- function(list_of_df, tag) {
     sum(grepl(tag_pattern(tag), df$qflag), na.rm = TRUE)
   }, integer(1)))
 }
-
 
 
 # ---------------------------------------------------------------------
@@ -255,7 +254,7 @@ qc_plot <- function(df, rain = NULL) {
 list_flagged <- lapply(list_SM_5, qc_plot, rain = df_rain_47m_15min)
 
 # ---------------------------------------------------------------------
-# 5) SANITY CHECKS
+# 5) SANITY CHECK
 # ---------------------------------------------------------------------
 
 stopifnot(all(vapply(list_flagged, function(df)
@@ -292,8 +291,3 @@ list_flagged <- lapply(list_flagged, function(df) {
                                   "qflag", "precip", "qflag_aqua")))
   df
 })
-
-
-
-
-
