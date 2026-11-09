@@ -6,20 +6,20 @@ Automated quality flagging for near-surface soil moisture time series at
 15-minute resolution, following the framework of Dorigo et al. (2013).
 
 Flags are cumulative — one observation may carry several codes, e.g. `"D04,D09.2"`.
-Only observations with no flag receive `G`.
+Only observations with no flag receive `G`. Thresholds are site-specific and in accordance to sensor installation depth.
 
 | Flag | Meaning | Test |
 |------|---------|------|
 | `G` | Good quality | no other flag |
-| `C01` | Below moisture threshold | `SM < 1` |
-| `C02` | Below second threshold | *optional* |
-| `C03` | Above saturation point | `SM > 60` |
-| `D01` | Soil temperature too low | `SoilTemp < 1` °C |
-| `D04` | Rise without precipitation | 15-min rise + 24-h rise + 24-h rain sum |
-| `D06` | Spike (positive/negative) | Dorigo et al. (2013) Eq. 4–6 |
-| `D07` | Drop / jump | Dorigo et al. (2013) Eq. 7–9 |
-| `D09.1` | Invariant values ≥ 12 h | rolling variance `== 0` |
-| `D09.2` | Identical value ≥ 48 h | constant run ≥ X steps |
+| `C01` | SM below moisture threshold | `SM < 1` [% VWC] |
+| `C02` | SM below second threshold | *optional* |
+| `C03` | SM above saturation point | `SM > 60` [% VWC] |
+| `D01` | Soil temperature too low | `SoilTemp < 1` [°C] |
+| `D04` | SM rise without precipitation | SM rise in 15-min interval + previous 24-h rise + previous 24-h rain sum = 0 |
+| `D06` | SM spike (positive/negative) | Dorigo et al. (2013) Eq. 4–6 |
+| `D07` | SM drop / jump | Dorigo et al. (2013) Eq. 7–9 |
+| `D09.1` | SM invariant values ≥ 12 h | rolling variance `== 0` |
+| `D09.2` | SM identical value ≥ 48 h | rolling variance `== 0` |
 
 ## Throughfall & stemflow quality control
 tbd
